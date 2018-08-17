@@ -20,6 +20,8 @@ const (
 type Object struct {
 	*NamedType
 
+	IsInput bool
+
 	Fields             []Field
 	Satisfies          []string
 	ResolverInterface  *Ref
@@ -27,6 +29,8 @@ type Object struct {
 	DisableConcurrency bool
 	Stream             bool
 }
+
+type UnmarshaledType Ref
 
 type Field struct {
 	*Type
@@ -120,7 +124,7 @@ func (f *Field) ShortResolverDeclaration() string {
 		res += fmt.Sprintf(", obj *%s", f.Object.FullName())
 	}
 	for _, arg := range f.Args {
-		res += fmt.Sprintf(", %s %s", arg.GoVarName, arg.Signature())
+		res += fmt.Sprintf(", %s %s", arg.GoVarName, arg.UnmarshaledSignature())
 	}
 
 	result := f.Signature()
@@ -166,7 +170,7 @@ func (f *Field) CallArgs() string {
 	}
 
 	for _, arg := range f.Args {
-		args = append(args, "args["+strconv.Quote(arg.GQLName)+"].("+arg.Signature()+")")
+		args = append(args, "args["+strconv.Quote(arg.GQLName)+"].("+arg.UnmarshaledSignature()+")")
 	}
 
 	return strings.Join(args, ", ")
@@ -174,7 +178,7 @@ func (f *Field) CallArgs() string {
 
 // should be in the template, but its recursive and has a bunch of args
 func (f *Field) WriteJson() string {
-	return f.doWriteJson("res", f.Type.Modifiers, false, 1)
+	return f.doWriteJson("res", f.RealModifiers(), false, 1)
 }
 
 func (f *Field) doWriteJson(val string, remainingMods []string, isPtr bool, depth int) string {

@@ -33,15 +33,37 @@ func (cfg *Config) bindTypes(imports *Imports, namedTypes NamedTypes, destDir st
 			continue
 		}
 
-		def, _ := findGoType(prog, t.Package, "Marshal"+t.GoType)
-		switch def := def.(type) {
+		marshalDef, _ := findGoType(prog, t.Package, "Marshal"+t.GoType)
+		unmarshalDef, _ := findGoType(prog, t.Package, "Unmarshal"+t.GoType)
+
+		switch def := marshalDef.(type) {
 		case *types.Func:
 			sig := def.Type().(*types.Signature)
 			cpy := t.Ref
 			t.Marshaler = &cpy
 
 			t.Package, t.GoType = pkgAndType(sig.Params().At(0).Type().String())
+			if strings.HasPrefix(t.Package, "*") {
+				t.IsPointer = true
+				t.Package = strings.TrimLeft(t.Package, "*")
+			}
+
 			t.Import = imports.add(t.Package)
+		}
+
+		switch def := unmarshalDef.(type) {
+		case *types.Func:
+			sig := def.Type().(*types.Signature)
+			cpy := t.Ref
+			t.Unmarshaler = &cpy
+
+			t.Unmarshaler.Package, t.Unmarshaler.GoType = pkgAndType(sig.Results().At(0).Type().String())
+			if strings.HasPrefix(t.Unmarshaler.Package, "*") {
+				t.IsPointer = true
+				t.Unmarshaler.Package = strings.TrimLeft(t.Unmarshaler.Package, "*")
+			}
+
+			t.Unmarshaler.Import = imports.add(t.Unmarshaler.Package)
 		}
 	}
 }
@@ -78,7 +100,7 @@ func (n NamedTypes) getType(t *ast.Type) *Type {
 			modifiers = append(modifiers, modList)
 			t = t.Elem
 		} else {
-			if !t.NonNull {
+			if !t.NonNull || n[t.NamedType].IsPointer {
 				modifiers = append(modifiers, modPtr)
 			}
 			if n[t.NamedType] == nil {

@@ -1,6 +1,6 @@
 	{{- if . }}args := map[string]interface{}{} {{end}}
 	{{- range $i, $arg := . }}
-		var arg{{$i}} {{$arg.Signature }}
+		var arg{{$i}} {{$arg.UnmarshaledSignature}}
 		if tmp, ok := rawArgs[{{$arg.GQLName|quote}}]; ok {
 			var err error
 			{{$arg.Unmarshal (print "arg" $i) "tmp" }}

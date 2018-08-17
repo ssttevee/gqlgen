@@ -13,9 +13,14 @@ import (
 		type {{.GoType}} interface {}
 	{{- else }}
 		type {{.GoType}} struct {
+			// {{ .IsInput }}
 			{{- range $field := .Fields }}
 				{{- if $field.GoFieldName }}
-					{{ $field.GoFieldName }} {{$field.Signature}} `json:"{{$field.GQLName}}"`
+					{{- if $model.IsInput }}
+						{{ $field.GoFieldName }} {{$field.UnmarshaledSignature}} `json:"{{$field.GQLName}}"`
+					{{- else }}
+						{{ $field.GoFieldName }} {{$field.Signature}} `json:"{{$field.GQLName}}"`
+					{{- end }}
 				{{- else }}
 					{{ $field.GoFKName }} {{$field.GoFKType}}
 				{{- end }}

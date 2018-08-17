@@ -12,8 +12,10 @@ type NamedType struct {
 	IsScalar    bool
 	IsInterface bool
 	IsInput     bool
+	IsPointer   bool
 	GQLType     string // Name of the graphql type
 	Marshaler   *Ref   // If this type has an external marshaler this will be set
+	Unmarshaler *Ref   // If this type has an external unmarshaler this will be set
 }
 
 type Ref struct {
@@ -62,6 +64,39 @@ func (t Type) FullSignature() string {
 	return strings.Join(t.Modifiers, "") + pkg + t.GoType
 }
 
+func (t *Type) RealModifiers() []string {
+	if t.IsPointer {
+		for i := 0; i < len(t.Modifiers); i++ {
+			if t.Modifiers[i] == modPtr {
+				return append(t.Modifiers[:i], t.Modifiers[i+1:]...)
+			}
+		}
+	}
+
+	return t.Modifiers
+}
+
+func (t Type) UnmarshaledSignature() string {
+	if t.Unmarshaler == nil {
+		return t.Signature()
+	}
+
+	return strings.Join(t.RealModifiers(), "") + t.Unmarshaler.FullName()
+}
+
+func (t Type) FullUnmarshaledSignature() string {
+	if t.Unmarshaler == nil {
+		return ""
+	}
+
+	pkg := ""
+	if t.Unmarshaler.Package != "" {
+		pkg = t.Unmarshaler.Package + "."
+	}
+
+	return strings.Join(t.RealModifiers(), "") + pkg + t.Unmarshaler.GoType
+}
+
 func (t Type) IsPtr() bool {
 	return len(t.Modifiers) > 0 && t.Modifiers[0] == modPtr
 }
@@ -83,7 +118,7 @@ func (t NamedType) IsMarshaled() bool {
 }
 
 func (t Type) Unmarshal(result, raw string) string {
-	return t.unmarshal(result, raw, t.Modifiers, 1)
+	return t.unmarshal(result, raw, t.RealModifiers(), 1)
 }
 
 func (t Type) unmarshal(result, raw string, remainingMods []string, depth int) string {
@@ -108,6 +143,12 @@ func (t Type) unmarshal(result, raw string, remainingMods []string, depth int) s
 		var rawIf = "rawIf" + strconv.Itoa(depth)
 		var index = "idx" + strconv.Itoa(depth)
 
+		var fullName string
+		if t.Unmarshaler != nil {
+			fullName = t.Unmarshaler.FullName()
+		} else {
+			fullName = t.FullName()
+		}
 		return tpl(`var {{.rawSlice}} []interface{}
 			if {{.raw}} != nil {
 				if tmp1, ok := {{.raw}}.([]interface{}); ok {
@@ -124,7 +165,7 @@ func (t Type) unmarshal(result, raw string, remainingMods []string, depth int) s
 			"rawSlice": rawIf,
 			"index":    index,
 			"result":   result,
-			"type":     strings.Join(remainingMods, "") + t.NamedType.FullName(),
+			"type":     strings.Join(remainingMods, "") + fullName,
 			"next":     t.unmarshal(result+"["+index+"]", rawIf+"["+index+"]", remainingMods[1:], depth+1),
 		})
 	}
@@ -135,7 +176,7 @@ func (t Type) unmarshal(result, raw string, remainingMods []string, depth int) s
 	}
 
 	return tpl(`{{- if .t.AliasedType }}
-			var castTmp {{.t.FullName}}
+			var castTmp {{.t.UnmarshaledSignature}}
 		{{ end }}
 			{{- if eq .t.GoType "map[string]interface{}" }}
 				{{- .result }} = {{.raw}}.(map[string]interface{})

@@ -45,7 +45,7 @@ func (cfg *Config) buildInputs(namedTypes NamedTypes, prog *loader.Program, impo
 }
 
 func (cfg *Config) buildInput(types NamedTypes, typ *ast.Definition) (*Object, error) {
-	obj := &Object{NamedType: types[typ.Name]}
+	obj := &Object{NamedType: types[typ.Name], IsInput: true}
 	typeEntry, entryExists := cfg.Models[typ.Name]
 
 	for _, field := range typ.Fields {

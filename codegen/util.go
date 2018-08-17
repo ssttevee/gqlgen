@@ -280,17 +280,18 @@ nextArg:
 }
 
 func validateTypeBinding(imports *Imports, field *Field, goType types.Type) error {
-	gqlType := normalizeVendor(field.Type.FullSignature())
+	gqlType := normalizeVendor(field.FullSignature())
+	gqlUnmarshaledType := normalizeVendor(field.FullUnmarshaledSignature())
 	goTypeStr := normalizeVendor(goType.String())
 
-	if goTypeStr == gqlType || "*"+goTypeStr == gqlType || goTypeStr == "*"+gqlType {
+	if trimAndCompare(goTypeStr, gqlType, "*") || trimAndCompare(goTypeStr, gqlUnmarshaledType, "*") {
 		field.Type.Modifiers = modifiersFromGoType(goType)
 		return nil
 	}
 
 	// deal with type aliases
-	underlyingStr := normalizeVendor(goType.Underlying().String())
-	if underlyingStr == gqlType || "*"+underlyingStr == gqlType || underlyingStr == "*"+gqlType {
+	underlyingStr := strings.TrimLeft(normalizeVendor(goType.Underlying().String()), "*")
+	if trimAndCompare(underlyingStr, gqlType, "*") || trimAndCompare(underlyingStr, gqlUnmarshaledType, "*") {
 		field.Type.Modifiers = modifiersFromGoType(goType)
 		pkg, typ := pkgAndType(goType.String())
 		imp := imports.findByPath(pkg)
@@ -299,6 +300,10 @@ func validateTypeBinding(imports *Imports, field *Field, goType types.Type) erro
 	}
 
 	return fmt.Errorf("%s is not compatible with %s", gqlType, goTypeStr)
+}
+
+func trimAndCompare(a, b, cutset string) bool {
+	return strings.TrimLeft(a, cutset) == strings.TrimLeft(b, cutset)
 }
 
 func modifiersFromGoType(t types.Type) []string {
