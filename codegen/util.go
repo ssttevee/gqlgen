@@ -334,17 +334,18 @@ nextArg:
 }
 
 func validateTypeBinding(field *Field, goType types.Type) error {
-	gqlType := normalizeVendor(field.Type.FullSignature())
+	gqlType := normalizeVendor(field.FullSignature())
+	gqlUnmarshaledType := normalizeVendor(field.FullUnmarshaledSignature())
 	goTypeStr := normalizeVendor(goType.String())
 
-	if equalTypes(goTypeStr, gqlType) {
+	if equalTypes(goTypeStr, gqlType) || equalTypes(goTypeStr, gqlUnmarshaledType) {
 		field.Type.Modifiers = modifiersFromGoType(goType)
 		return nil
 	}
 
 	// deal with type aliases
 	underlyingStr := normalizeVendor(goType.Underlying().String())
-	if equalTypes(underlyingStr, gqlType) {
+	if equalTypes(underlyingStr, gqlType) || equalTypes(underlyingStr, gqlUnmarshaledType) {
 		field.Type.Modifiers = modifiersFromGoType(goType)
 		pkg, typ := pkgAndType(goType.String())
 		field.AliasedType = &Ref{GoType: typ, Package: pkg}

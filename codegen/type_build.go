@@ -33,14 +33,37 @@ func (cfg *Config) bindTypes(namedTypes NamedTypes, destDir string, prog *loader
 			continue
 		}
 
-		def, _ := findGoType(prog, t.Package, "Marshal"+t.GoType)
-		switch def := def.(type) {
+		marshalDef, _ := findGoType(prog, t.Package, "Marshal"+t.GoType)
+		unmarshalDef, _ := findGoType(prog, t.Package, "Unmarshal"+t.GoType)
+
+		switch def := marshalDef.(type) {
 		case *types.Func:
 			sig := def.Type().(*types.Signature)
 			cpy := t.Ref
 			t.Marshaler = &cpy
 
 			t.Package, t.GoType = pkgAndType(sig.Params().At(0).Type().String())
+			if strings.HasPrefix(t.Package, "*") {
+				t.IsPointer = true
+				t.Package = strings.TrimLeft(t.Package, "*")
+			}
+		}
+
+		if t.IsEnum {
+			continue
+		}
+
+		switch def := unmarshalDef.(type) {
+		case *types.Func:
+			sig := def.Type().(*types.Signature)
+			cpy := t.Ref
+			t.Unmarshaler = &cpy
+
+			t.Unmarshaler.Package, t.Unmarshaler.GoType = pkgAndType(sig.Results().At(0).Type().String())
+			if strings.HasPrefix(t.Unmarshaler.Package, "*") {
+				t.IsPointer = true
+				t.Unmarshaler.Package = strings.TrimLeft(t.Unmarshaler.Package, "*")
+			}
 		}
 	}
 }
@@ -49,8 +72,10 @@ func (cfg *Config) bindTypes(namedTypes NamedTypes, destDir string, prog *loader
 // don't recurse into object fields or interfaces yet, lets make sure we have collected everything first.
 func namedTypeFromSchema(schemaType *ast.Definition) *NamedType {
 	switch schemaType.Kind {
-	case ast.Scalar, ast.Enum:
+	case ast.Scalar:
 		return &NamedType{GQLType: schemaType.Name, IsScalar: true}
+	case ast.Enum:
+		return &NamedType{GQLType: schemaType.Name, IsScalar: true, IsEnum: true}
 	case ast.Interface, ast.Union:
 		return &NamedType{GQLType: schemaType.Name, IsInterface: true}
 	case ast.InputObject:
@@ -78,7 +103,7 @@ func (n NamedTypes) getType(t *ast.Type) *Type {
 			modifiers = append(modifiers, modList)
 			t = t.Elem
 		} else {
-			if !t.NonNull {
+			if !t.NonNull || n[t.NamedType].IsPointer {
 				modifiers = append(modifiers, modPtr)
 			}
 			if n[t.NamedType] == nil {
