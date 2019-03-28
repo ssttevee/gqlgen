@@ -262,7 +262,7 @@ func CacheSize(size int) Option {
 
 const DefaultCacheSize = 1000
 
-func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.HandlerFunc {
+func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.Handler {
 	cfg := &Config{
 		cacheSize: DefaultCacheSize,
 		upgrader: websocket.Upgrader{
@@ -289,13 +289,12 @@ func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.HandlerFunc 
 		cfg.tracer = &graphql.NopTracer{}
 	}
 
-	handler := &graphqlHandler{
-		cfg:   cfg,
-		cache: cache,
-		exec:  exec,
+	return &graphqlHandler{
+		cfg:        cfg,
+		cache:      cache,
+		exec:       exec,
+		closeFuncs: map[int64]func(){},
 	}
-
-	return handler.ServeHTTP
 }
 
 var _ http.Handler = (*graphqlHandler)(nil)
@@ -304,6 +303,9 @@ type graphqlHandler struct {
 	cfg   *Config
 	cache *lru.Cache
 	exec  graphql.ExecutableSchema
+
+	mu         sync.Mutex
+	closeFuncs map[int64]func()
 }
 
 func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +496,7 @@ func (pr *preparedRequest) context(ctx context.Context, gh *graphqlHandler) (con
 
 func (gh *graphqlHandler) subscribe(ctx context.Context, pr *preparedRequest, w http.ResponseWriter) {
 	ctx, _ = pr.context(ctx, gh)
-	connectSSE(ctx, w, gh, pr.op)
+	gh.connectSSE(ctx, w, pr.op)
 }
 
 func (gh *graphqlHandler) execute(ctx context.Context, pr *preparedRequest) (code int, resp *graphql.Response) {
