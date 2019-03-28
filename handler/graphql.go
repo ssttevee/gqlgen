@@ -5,12 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"regexp"
-	"strings"
-	"sync"
-
 	"github.com/99designs/gqlgen/complexity"
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/gorilla/websocket"
@@ -19,6 +13,10 @@ import (
 	"github.com/vektah/gqlparser/gqlerror"
 	"github.com/vektah/gqlparser/parser"
 	"github.com/vektah/gqlparser/validator"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 )
 
 type params struct {
@@ -575,42 +573,6 @@ func (gh *graphqlHandler) validateOperation(ctx context.Context, args *validateO
 	}
 
 	return ctx, op, vars, nil
-}
-
-var sseContentTypePattern = regexp.MustCompile("(?:^|,)(?:text/event-stream|\\*/\\*)(?:$|,|;)")
-
-func connectSSE(ctx context.Context, w http.ResponseWriter, gh *graphqlHandler, op *ast.OperationDefinition) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		panic("w must implement http.Flusher")
-	}
-
-	if gh.cfg.subscriptionHook != nil {
-		var err error
-		ctx, err = gh.cfg.subscriptionHook(ctx, func(ctx context.Context) (context.Context, error) {
-			return ctx, nil
-		})
-		if err != nil {
-			sendErrorf(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Connection", "keep-alive")
-
-	flusher.Flush()
-
-	// connection is ready
-	for next := gh.exec.Subscription(ctx, op); ; {
-		result := next()
-		if result == nil {
-			return
-		}
-		b, _ := json.Marshal(result)
-		fmt.Fprintf(w, "data: %s\n\n", b)
-		flusher.Flush()
-	}
 }
 
 func jsonDecode(r io.Reader, val interface{}) error {
