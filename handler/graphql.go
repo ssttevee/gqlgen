@@ -37,6 +37,7 @@ type Config struct {
 	errorPresenter                  graphql.ErrorPresenterFunc
 	resolverHook                    graphql.FieldMiddleware
 	requestHook                     graphql.RequestMiddleware
+	subscriptionHook                graphql.SubscriptionMiddleware
 	tracer                          graphql.Tracer
 	complexityLimit                 int
 	complexityLimitFunc             graphql.ComplexityLimitFunc
@@ -157,6 +158,22 @@ func RequestMiddleware(middleware graphql.RequestMiddleware) Option {
 		lastResolve := cfg.requestHook
 		cfg.requestHook = func(ctx context.Context, next func(ctx context.Context) []byte) []byte {
 			return lastResolve(ctx, func(ctx context.Context) []byte {
+				return middleware(ctx, next)
+			})
+		}
+	}
+}
+
+func SubscriptionMiddleware(middleware graphql.SubscriptionMiddleware) Option {
+	return func(cfg *Config) {
+		if cfg.subscriptionHook == nil {
+			cfg.subscriptionHook = middleware
+			return
+		}
+
+		lastResolve := cfg.subscriptionHook
+		cfg.subscriptionHook = func(ctx context.Context, next func(ctx context.Context) (context.Context, error)) (context.Context, error) {
+			return lastResolve(ctx, func(ctx context.Context) (context.Context, error) {
 				return middleware(ctx, next)
 			})
 		}
@@ -447,6 +464,16 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqCtx := gh.cfg.newRequestContext(gh.exec, doc, op, reqParams.Query, vars)
 	ctx = graphql.WithRequestContext(ctx, reqCtx)
 
+	if op.Operation == ast.Subscription {
+		if !sseContentTypePattern.MatchString(r.Header.Get("Accept")) {
+			sendErrorf(w, http.StatusBadRequest, `request must accept "text/event-stream"`)
+			return
+		}
+
+		connectSSE(ctx, w, gh, op)
+		return
+	}
+
 	defer func() {
 		if err := recover(); err != nil {
 			userErr := reqCtx.Recover(ctx, err)
@@ -526,7 +553,7 @@ func (gh *graphqlHandler) validateOperation(ctx context.Context, args *validateO
 		return ctx, nil, nil, gqlerror.List{gqlerror.Errorf("operation %s not found", args.OperationName)}
 	}
 
-	if op.Operation != ast.Query && args.R.Method == http.MethodGet {
+	if op.Operation != ast.Query && op.Operation != ast.Subscription && args.R.Method == http.MethodGet {
 		return ctx, nil, nil, gqlerror.List{gqlerror.Errorf("GET requests only allow query operations")}
 	}
 

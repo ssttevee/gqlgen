@@ -70,14 +70,14 @@ func connectWs(exec graphql.ExecutableSchema, w http.ResponseWriter, r *http.Req
 		cache:  cache,
 	}
 
-	if !conn.init() {
+	if !conn.init(cfg.subscriptionHook) {
 		return
 	}
 
 	conn.run()
 }
 
-func (c *wsConnection) init() bool {
+func (c *wsConnection) init(hook graphql.SubscriptionMiddleware) bool {
 	message := c.readOp()
 	if message == nil {
 		c.close(websocket.CloseProtocolError, "decoding error")
@@ -90,6 +90,18 @@ func (c *wsConnection) init() bool {
 			c.initPayload = make(InitPayload)
 			err := json.Unmarshal(message.Payload, &c.initPayload)
 			if err != nil {
+				return false
+			}
+		}
+
+		if hook != nil {
+			var err error
+			c.ctx, err = hook(c.ctx, func(ctx context.Context) (context.Context, error) {
+				return ctx, nil
+			})
+			if err != nil {
+				c.sendConnectionError(err.Error())
+				c.close(websocket.CloseProtocolError, err.Error())
 				return false
 			}
 		}

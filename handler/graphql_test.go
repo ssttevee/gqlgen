@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"os"
 	"strings"
 	"sync"
@@ -224,6 +225,50 @@ func TestHandlerComplexity(t *testing.T) {
 			assert.Equal(t, http.StatusOK, resp.Code)
 			assert.Equal(t, `{"data":{"name":"test"}}`, resp.Body.String())
 		})
+	})
+}
+
+func TestHandlerSSE(t *testing.T) {
+	next := make(chan struct{})
+	h := GraphQL(&executableSchemaStub{next})
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	const query = `subscription{user{title}}`
+
+	t.Run("connection must be kept alive", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/graphql?query="+query, nil)
+		w := httptest.NewRecorder()
+
+		h.ServeHTTP(w, r)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Equal(t, `{"data":null,"errors":[{"message":"connection must be \"keep-alive\""}]}`, w.Body.String())
+	})
+
+	t.Run("request must be accept event stream", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/graphql?query="+query, nil)
+		w := httptest.NewRecorder()
+
+		r.Header.Set("Connection", "keep-alive")
+
+		h.ServeHTTP(w, r)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Equal(t, `{"data":null,"errors":[{"message":"request must accept \"text/event-stream\""}]}`, w.Body.String())
+	})
+
+	t.Run("client can receive data", func(t *testing.T) {
+		read, cancel := sseConnect(h, "/graphql?query="+query)
+		defer cancel()
+
+		for i := 0; i < 2; i++ {
+			next <- struct{}{}
+			data, err := read()
+			require.NoError(t, err)
+			require.Equal(t, data, `{"data":{"name":"test"}}`)
+		}
 	})
 }
 
@@ -687,6 +732,37 @@ func doRequest(handler http.Handler, method string, target string, body string) 
 
 	handler.ServeHTTP(w, r)
 	return w
+}
+
+func sseConnect(handler http.Handler, target string) (func() (string, error), func()) {
+	r := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+
+	r.Header.Set("Connection", "keep-alive")
+	r.Header.Set("Accept", "text/event-stream")
+
+	cctx, cancel := context.WithCancel(r.Context())
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(w, r.WithContext(cctx))
+		close(done)
+	}()
+
+	return func() (string, error) {
+		defer w.Body.Reset()
+		var s string
+		for s == "" {
+			runtime.Gosched()
+			select {
+			case <-done:
+				return "", io.EOF
+			default:
+				s = w.Body.String()
+			}
+		}
+		return s[6 : len(s)-2], nil
+	}, cancel
 }
 
 func TestBytesRead(t *testing.T) {
