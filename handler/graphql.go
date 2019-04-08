@@ -262,7 +262,7 @@ func CacheSize(size int) Option {
 
 const DefaultCacheSize = 1000
 
-func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.Handler {
+func New(exec graphql.ExecutableSchema, options ...Option) *Handler {
 	cfg := &Config{
 		cacheSize: DefaultCacheSize,
 		upgrader: websocket.Upgrader{
@@ -289,7 +289,7 @@ func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.Handler {
 		cfg.tracer = &graphql.NopTracer{}
 	}
 
-	return &graphqlHandler{
+	return &Handler{
 		cfg:        cfg,
 		cache:      cache,
 		exec:       exec,
@@ -297,9 +297,13 @@ func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.Handler {
 	}
 }
 
-var _ http.Handler = (*graphqlHandler)(nil)
+func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.Handler {
+	return New(exec, options...)
+}
 
-type graphqlHandler struct {
+var _ http.Handler = (*Handler)(nil)
+
+type Handler struct {
 	cfg   *Config
 	cache *lru.Cache
 	exec  graphql.ExecutableSchema
@@ -308,7 +312,7 @@ type graphqlHandler struct {
 	closeFuncs map[int64]func()
 }
 
-func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (gh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Allow", "OPTIONS, GET, POST")
 		w.WriteHeader(http.StatusOK)
@@ -436,7 +440,7 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (gh *graphqlHandler) prepareRequest(ctx context.Context, method string, reqParams *params) (*preparedRequest, gqlerror.List) {
+func (gh *Handler) prepareRequest(ctx context.Context, method string, reqParams *params) (*preparedRequest, gqlerror.List) {
 	var doc *ast.QueryDocument
 	var cacheHit bool
 	if gh.cache != nil {
@@ -489,17 +493,17 @@ func (pr *preparedRequest) isSubscription() bool {
 	return pr.op.Operation == ast.Subscription
 }
 
-func (pr *preparedRequest) context(ctx context.Context, gh *graphqlHandler) (context.Context, *graphql.RequestContext) {
+func (pr *preparedRequest) context(ctx context.Context, gh *Handler) (context.Context, *graphql.RequestContext) {
 	reqCtx := gh.cfg.newRequestContext(gh.exec, pr.doc, pr.op, pr.query, pr.vars)
 	return graphql.WithRequestContext(ctx, reqCtx), reqCtx
 }
 
-func (gh *graphqlHandler) subscribe(ctx context.Context, pr *preparedRequest, w http.ResponseWriter) {
+func (gh *Handler) subscribe(ctx context.Context, pr *preparedRequest, w http.ResponseWriter) {
 	ctx, _ = pr.context(ctx, gh)
 	gh.connectSSE(ctx, w, pr.op)
 }
 
-func (gh *graphqlHandler) execute(ctx context.Context, pr *preparedRequest) (code int, resp *graphql.Response) {
+func (gh *Handler) execute(ctx context.Context, pr *preparedRequest) (code int, resp *graphql.Response) {
 	ctx, reqCtx := pr.context(ctx, gh)
 
 	defer func() {
@@ -529,7 +533,7 @@ type parseOperationArgs struct {
 	CachedDoc *ast.QueryDocument
 }
 
-func (gh *graphqlHandler) parseOperation(ctx context.Context, args *parseOperationArgs) (context.Context, *ast.QueryDocument, *gqlerror.Error) {
+func (gh *Handler) parseOperation(ctx context.Context, args *parseOperationArgs) (context.Context, *ast.QueryDocument, *gqlerror.Error) {
 	ctx = gh.cfg.tracer.StartOperationParsing(ctx)
 	defer func() { gh.cfg.tracer.EndOperationParsing(ctx) }()
 
@@ -553,7 +557,7 @@ type validateOperationArgs struct {
 	Variables     map[string]interface{}
 }
 
-func (gh *graphqlHandler) validateOperation(ctx context.Context, args *validateOperationArgs) (context.Context, *ast.OperationDefinition, map[string]interface{}, gqlerror.List) {
+func (gh *Handler) validateOperation(ctx context.Context, args *validateOperationArgs) (context.Context, *ast.OperationDefinition, map[string]interface{}, gqlerror.List) {
 	ctx = gh.cfg.tracer.StartOperationValidation(ctx)
 	defer func() { gh.cfg.tracer.EndOperationValidation(ctx) }()
 

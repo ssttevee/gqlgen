@@ -18,7 +18,7 @@ const pingInterval = 60 * time.Second
 
 var sseContentTypePattern = regexp.MustCompile("(?:^|,)(?:text/event-stream|\\*/\\*)(?:$|,|;)")
 
-func (gh *graphqlHandler) Close() {
+func (gh *Handler) Close() {
 	gh.mu.Lock()
 	defer gh.mu.Unlock()
 
@@ -29,7 +29,7 @@ func (gh *graphqlHandler) Close() {
 	gh.closeFuncs = map[int64]func(){}
 }
 
-func (gh *graphqlHandler) registerCloser(f func()) int64 {
+func (gh *Handler) registerCloser(f func()) int64 {
 	gh.mu.Lock()
 	defer gh.mu.Unlock()
 
@@ -46,14 +46,14 @@ func (gh *graphqlHandler) registerCloser(f func()) int64 {
 	return id
 }
 
-func (gh *graphqlHandler) unregisterCloser(id int64) {
+func (gh *Handler) unregisterCloser(id int64) {
 	gh.mu.Lock()
 	defer gh.mu.Unlock()
 
 	delete(gh.closeFuncs, id)
 }
 
-func (gh *graphqlHandler) connectSSE(ctx context.Context, w http.ResponseWriter, op *ast.OperationDefinition) {
+func (gh *Handler) connectSSE(ctx context.Context, w http.ResponseWriter, op *ast.OperationDefinition) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		panic("w must implement http.Flusher")
