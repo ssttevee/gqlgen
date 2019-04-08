@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/99designs/gqlgen/graphql"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"sync"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/vektah/gqlparser/ast"
 )
 
@@ -17,7 +18,42 @@ const pingInterval = 60 * time.Second
 
 var sseContentTypePattern = regexp.MustCompile("(?:^|,)(?:text/event-stream|\\*/\\*)(?:$|,|;)")
 
-func connectSSE(ctx context.Context, w http.ResponseWriter, gh *graphqlHandler, op *ast.OperationDefinition) {
+func (gh *Handler) Close() {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+
+	for _, closeFunc := range gh.closeFuncs {
+		closeFunc()
+	}
+
+	gh.closeFuncs = map[int64]func(){}
+}
+
+func (gh *Handler) registerCloser(f func()) int64 {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+
+	var id int64
+	for {
+		id = rand.Int63()
+		if _, ok := gh.closeFuncs[id]; !ok {
+			break
+		}
+	}
+
+	gh.closeFuncs[id] = f
+
+	return id
+}
+
+func (gh *Handler) unregisterCloser(id int64) {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+
+	delete(gh.closeFuncs, id)
+}
+
+func (gh *Handler) connectSSE(ctx context.Context, w http.ResponseWriter, op *ast.OperationDefinition) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		panic("w must implement http.Flusher")
@@ -38,6 +74,13 @@ func connectSSE(ctx context.Context, w http.ResponseWriter, gh *graphqlHandler, 
 	w.Header().Set("Connection", "keep-alive")
 
 	flusher.Flush()
+
+	done := make(chan struct{})
+	defer gh.unregisterCloser(gh.registerCloser(func() {
+		close(done)
+	}))
+
+	// connection is ready
 
 	var mu sync.Mutex
 	push := func(data *graphql.Response) {
@@ -63,7 +106,6 @@ func connectSSE(ctx context.Context, w http.ResponseWriter, gh *graphqlHandler, 
 		}
 	}()
 
-	// connection is ready
 	t := time.NewTimer(pingInterval)
 	for {
 		select {
@@ -83,6 +125,10 @@ func connectSSE(ctx context.Context, w http.ResponseWriter, gh *graphqlHandler, 
 
 		case <-ctx.Done():
 			return
+
+		case <-done:
+			return
+
 		}
 
 		t.Reset(pingInterval)

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/99designs/gqlgen/complexity"
@@ -314,7 +315,7 @@ const DefaultUploadMaxMemory = 32 << 20
 // as multipart/form-data.
 const DefaultUploadMaxSize = 32 << 20
 
-func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.HandlerFunc {
+func New(exec graphql.ExecutableSchema, options ...Option) *Handler {
 	cfg := &Config{
 		cacheSize:                       DefaultCacheSize,
 		uploadMaxMemory:                 DefaultUploadMaxMemory,
@@ -344,24 +345,30 @@ func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.HandlerFunc 
 		cfg.tracer = &graphql.NopTracer{}
 	}
 
-	handler := &graphqlHandler{
-		cfg:   cfg,
-		cache: cache,
-		exec:  exec,
+	return &Handler{
+		cfg:        cfg,
+		cache:      cache,
+		exec:       exec,
+		closeFuncs: map[int64]func(){},
 	}
-
-	return handler.ServeHTTP
 }
 
-var _ http.Handler = (*graphqlHandler)(nil)
+func GraphQL(exec graphql.ExecutableSchema, options ...Option) http.Handler {
+	return New(exec, options...)
+}
 
-type graphqlHandler struct {
+var _ http.Handler = (*Handler)(nil)
+
+type Handler struct {
 	cfg   *Config
 	cache *lru.Cache
 	exec  graphql.ExecutableSchema
+
+	mu         sync.Mutex
+	closeFuncs map[int64]func()
 }
 
-func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (gh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Allow", "OPTIONS, GET, POST")
 		w.WriteHeader(http.StatusOK)
@@ -469,8 +476,7 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sendErrorf(w, http.StatusBadRequest, `request must accept "text/event-stream"`)
 			return
 		}
-
-		connectSSE(ctx, w, gh, op)
+		gh.connectSSE(ctx, w, op)
 		return
 	}
 
@@ -513,7 +519,7 @@ type parseOperationArgs struct {
 	CachedDoc *ast.QueryDocument
 }
 
-func (gh *graphqlHandler) parseOperation(ctx context.Context, args *parseOperationArgs) (context.Context, *ast.QueryDocument, *gqlerror.Error) {
+func (gh *Handler) parseOperation(ctx context.Context, args *parseOperationArgs) (context.Context, *ast.QueryDocument, *gqlerror.Error) {
 	ctx = gh.cfg.tracer.StartOperationParsing(ctx)
 	defer func() { gh.cfg.tracer.EndOperationParsing(ctx) }()
 
@@ -537,7 +543,7 @@ type validateOperationArgs struct {
 	Variables     map[string]interface{}
 }
 
-func (gh *graphqlHandler) validateOperation(ctx context.Context, args *validateOperationArgs) (context.Context, *ast.OperationDefinition, map[string]interface{}, gqlerror.List) {
+func (gh *Handler) validateOperation(ctx context.Context, args *validateOperationArgs) (context.Context, *ast.OperationDefinition, map[string]interface{}, gqlerror.List) {
 	ctx = gh.cfg.tracer.StartOperationValidation(ctx)
 	defer func() { gh.cfg.tracer.EndOperationValidation(ctx) }()
 
