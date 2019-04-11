@@ -51,7 +51,7 @@
 				if v == nil {
 					{{- if $type.GQL.NonNull }}
 						if !ec.HasError(graphql.GetResolverContext(ctx)) {
-							ec.Errorf(ctx, "must not be null")
+							panic("must not be null")
 						}
 					{{- end }}
 					return graphql.Null
@@ -114,7 +114,7 @@
 							res := {{ $type.Marshaler | call }}({{- if $type.CastType }}{{ $type.CastType | ref }}(v){{else}}v{{- end }})
 							if res == graphql.Null {
 								if !ec.HasError(graphql.GetResolverContext(ctx)) {
-									ec.Errorf(ctx, "must not be null")
+									panic("must not be null")
 								}
 							}
 							return res
