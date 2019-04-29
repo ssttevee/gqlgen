@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 )
 
 type params struct {
+	ID            string                 `json:"id"`
 	Query         string                 `json:"query"`
 	OperationName string                 `json:"operationName"`
 	Variables     map[string]interface{} `json:"variables"`
@@ -381,7 +383,10 @@ func (gh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	var batch []params
 	var reqParams params
+
 	switch r.Method {
 	case http.MethodGet:
 		reqParams.Query = r.URL.Query().Get("query")
@@ -402,9 +407,16 @@ func (gh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		switch mediaType {
 		case "application/json":
-			if err := jsonDecode(r.Body, &reqParams); err != nil {
-				sendErrorf(w, http.StatusBadRequest, "json body could not be decoded: "+err.Error())
-				return
+			var buf bytes.Buffer
+			if _, err := buf.ReadFrom(r.Body); err != nil {
+				sendErrorf(w, http.StatusBadRequest, "json body could not be decoded: %s", err)
+			}
+
+			if err := jsonDecode(bytes.NewBuffer(buf.Bytes()), &batch); err != nil {
+				if err := jsonDecode(&buf, &reqParams); err != nil {
+					sendErrorf(w, http.StatusBadRequest, "json body could not be decoded: %s", err)
+					return
+				}
 			}
 
 		case "multipart/form-data":
@@ -433,6 +445,89 @@ func (gh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	var status int
+	var response interface{}
+	if batch == nil {
+		pr, errs := gh.prepareRequest(ctx, r.Method, &reqParams)
+		if errs != nil {
+			sendError(w, http.StatusUnprocessableEntity, errs...)
+			return
+		}
+
+		if pr.isSubscription() {
+			if !sseContentTypePattern.MatchString(r.Header.Get("Accept")) {
+				sendErrorf(w, http.StatusBadRequest, `request must accept "text/event-stream"`)
+				return
+			}
+
+			gh.subscribe(ctx, pr, w)
+			return
+		}
+
+		status, response = gh.execute(ctx, pr)
+
+		response.(*graphql.Response).ID = reqParams.ID
+		if response.(*graphql.Response).ID == "" {
+			response.(*graphql.Response).ID = reqParams.OperationName
+		}
+	} else {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+
+		wg.Add(len(batch))
+
+		responses := make([]*graphql.Response, len(batch))
+		for i := range batch {
+			go func(i int) {
+				defer wg.Done()
+
+				var code int
+
+				defer func() {
+					responses[i].ID = batch[i].ID
+					if responses[i].ID == "" {
+						responses[i].ID = batch[i].OperationName
+					}
+
+					mu.Lock()
+					defer mu.Unlock()
+
+					if status == 0 {
+						status = code
+					} else if status != code {
+						status = http.StatusMultiStatus
+					}
+				}()
+
+				pr, errs := gh.prepareRequest(ctx, r.Method, &batch[i])
+				if errs != nil {
+					status = http.StatusUnprocessableEntity
+					responses[i] = fail(errs...)
+					return
+				}
+
+				if pr.isSubscription() {
+					status = http.StatusBadRequest
+					responses[i] = failf("batched subscriptions are not supported")
+					return
+				}
+
+				code, responses[i] = gh.execute(ctx, pr)
+			}(i)
+		}
+
+		response = responses
+
+		wg.Wait()
+	}
+
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		panic(err)
+	}
+}
+
+func (gh *Handler) prepareRequest(ctx context.Context, method string, reqParams *params) (*preparedRequest, gqlerror.List) {
 	var doc *ast.QueryDocument
 	var cacheHit bool
 	if gh.cache != nil {
@@ -448,70 +543,76 @@ func (gh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		CachedDoc: doc,
 	})
 	if gqlErr != nil {
-		sendError(w, http.StatusUnprocessableEntity, gqlErr)
-		return
+		return nil, gqlerror.List{gqlErr}
 	}
 
 	ctx, op, vars, listErr := gh.validateOperation(ctx, &validateOperationArgs{
 		Doc:           doc,
 		OperationName: reqParams.OperationName,
 		CacheHit:      cacheHit,
-		R:             r,
+		Method:        method,
 		Variables:     reqParams.Variables,
 	})
 	if len(listErr) != 0 {
-		sendError(w, http.StatusUnprocessableEntity, listErr...)
-		return
+		return nil, listErr
 	}
 
 	if gh.cache != nil && !cacheHit {
 		gh.cache.Add(reqParams.Query, doc)
 	}
 
-	reqCtx := gh.cfg.newRequestContext(gh.exec, doc, op, reqParams.Query, vars)
-	ctx = graphql.WithRequestContext(ctx, reqCtx)
+	return &preparedRequest{
+		doc:   doc,
+		op:    op,
+		query: reqParams.Query,
+		vars:  vars,
+	}, nil
+}
 
-	if op.Operation == ast.Subscription {
-		if !sseContentTypePattern.MatchString(r.Header.Get("Accept")) {
-			sendErrorf(w, http.StatusBadRequest, `request must accept "text/event-stream"`)
-			return
-		}
-		gh.connectSSE(ctx, w, op)
-		return
-	}
+type preparedRequest struct {
+	doc   *ast.QueryDocument
+	op    *ast.OperationDefinition
+	query string
+	vars  map[string]interface{}
+}
+
+func (pr *preparedRequest) isSubscription() bool {
+	return pr.op.Operation == ast.Subscription
+}
+
+func (pr *preparedRequest) context(ctx context.Context, gh *Handler) (context.Context, *graphql.RequestContext) {
+	reqCtx := gh.cfg.newRequestContext(gh.exec, pr.doc, pr.op, pr.query, pr.vars)
+	return graphql.WithRequestContext(ctx, reqCtx), reqCtx
+}
+
+func (gh *Handler) subscribe(ctx context.Context, pr *preparedRequest, w http.ResponseWriter) {
+	ctx, _ = pr.context(ctx, gh)
+	gh.connectSSE(ctx, w, pr.op)
+}
+
+func (gh *Handler) execute(ctx context.Context, pr *preparedRequest) (code int, resp *graphql.Response) {
+	ctx, reqCtx := pr.context(ctx, gh)
 
 	defer func() {
 		if err := recover(); err != nil {
 			userErr := reqCtx.Recover(ctx, err)
-			sendErrorf(w, http.StatusUnprocessableEntity, userErr.Error())
+			code = http.StatusUnprocessableEntity
+			resp = failf(userErr.Error())
 		}
 	}()
 
-	if gh.cfg.complexityLimitFunc != nil {
-		reqCtx.ComplexityLimit = gh.cfg.complexityLimitFunc(ctx)
-	}
-
 	if reqCtx.ComplexityLimit > 0 && reqCtx.OperationComplexity > reqCtx.ComplexityLimit {
-		sendErrorf(w, http.StatusUnprocessableEntity, "operation has complexity %d, which exceeds the limit of %d", reqCtx.OperationComplexity, reqCtx.ComplexityLimit)
-		return
+		return http.StatusUnprocessableEntity, failf("operation has complexity %d, which exceeds the limit of %d", reqCtx.OperationComplexity, reqCtx.ComplexityLimit)
 	}
 
-	switch op.Operation {
+	switch pr.op.Operation {
 	case ast.Query:
-		b, err := json.Marshal(gh.exec.Query(ctx, op))
-		if err != nil {
-			panic(err)
-		}
-		w.Write(b)
+		return http.StatusOK, gh.exec.Query(ctx, pr.op)
 	case ast.Mutation:
-		b, err := json.Marshal(gh.exec.Mutation(ctx, op))
-		if err != nil {
-			panic(err)
-		}
-		w.Write(b)
-	default:
-		sendErrorf(w, http.StatusBadRequest, "unsupported operation type")
+		return http.StatusOK, gh.exec.Mutation(ctx, pr.op)
 	}
+
+	return http.StatusBadRequest, failf("unsupported operation type")
 }
 
 type parseOperationArgs struct {
@@ -539,7 +640,7 @@ type validateOperationArgs struct {
 	Doc           *ast.QueryDocument
 	OperationName string
 	CacheHit      bool
-	R             *http.Request
+	Method        string
 	Variables     map[string]interface{}
 }
 
@@ -559,10 +660,6 @@ func (gh *Handler) validateOperation(ctx context.Context, args *validateOperatio
 		return ctx, nil, nil, gqlerror.List{gqlerror.Errorf("operation %s not found", args.OperationName)}
 	}
 
-	if op.Operation != ast.Query && op.Operation != ast.Subscription && args.R.Method == http.MethodGet {
-		return ctx, nil, nil, gqlerror.List{gqlerror.Errorf("GET requests only allow query operations")}
-	}
-
 	vars, err := validator.VariableValues(gh.exec.Schema(), op, args.Variables)
 	if err != nil {
 		return ctx, nil, nil, gqlerror.List{err}
@@ -577,6 +674,18 @@ func jsonDecode(r io.Reader, val interface{}) error {
 	return dec.Decode(val)
 }
 
+func errorf(format string, args ...interface{}) *gqlerror.Error {
+	return &gqlerror.Error{Message: fmt.Sprintf(format, args...)}
+}
+
+func fail(errs ...*gqlerror.Error) *graphql.Response {
+	return &graphql.Response{Errors: errs}
+}
+
+func failf(format string, args ...interface{}) *graphql.Response {
+	return fail(errorf(format, args...))
+}
+
 func sendError(w http.ResponseWriter, code int, errors ...*gqlerror.Error) {
 	w.WriteHeader(code)
 	b, err := json.Marshal(&graphql.Response{Errors: errors})
@@ -587,7 +696,7 @@ func sendError(w http.ResponseWriter, code int, errors ...*gqlerror.Error) {
 }
 
 func sendErrorf(w http.ResponseWriter, code int, format string, args ...interface{}) {
-	sendError(w, code, &gqlerror.Error{Message: fmt.Sprintf(format, args...)})
+	sendError(w, code, errorf(format, args...))
 }
 
 type bytesReader struct {
